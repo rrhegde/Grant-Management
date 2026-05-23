@@ -52,10 +52,18 @@ function processAllFolders() {
     // PERFORMANCE OPTIMIZATION: 
     // Load IDs into a Set ONCE per folder, not once per file.
     const existingIds = new Set();
+    const existingDisbursementIds = new Set();
     const lastRow = targetSheet.getLastRow();
     if (lastRow > 1) {
-      const data = targetSheet.getRange(2, idIndex + 1, lastRow - 1, 1).getValues();
-      data.forEach(row => { if (row[0]) existingIds.add(row[0].toString()); });
+      if (folderName === "Benevity") {
+        // Load Disbursement IDs for Benevity (Column Z is column index 26)
+        const disbData = targetSheet.getRange(2, 26, lastRow - 1, 1).getValues();
+        disbData.forEach(row => { if (row[0]) existingDisbursementIds.add(row[0].toString()); });
+      } else {
+        // Load Transaction/Donation IDs for other platforms
+        const data = targetSheet.getRange(2, idIndex + 1, lastRow - 1, 1).getValues();
+        data.forEach(row => { if (row[0]) existingIds.add(row[0].toString()); });
+      }
     }
 
     let folderResults = { name: folderName, filesProcessed: 0, rowsAdded: 0, duplicatesSkipped: 0, errors: [] };
@@ -73,13 +81,11 @@ function processAllFolders() {
 
         let rowsToImport = [];
         let firstRowId = "";
+        let disbursementId = "";
 
         if (folderName === "Benevity") {
           // Metadata and custom layout extraction for Benevity
-          // 1. Period Ending (Row 5 - index 4)
-          // 2. Disbursement ID (Row 8 - index 7)
           let periodEnding = "";
-          let disbursementId = "";
           
           for (let i = 0; i < Math.min(csvData.length, 11); i++) {
             const firstVal = csvData[i][0] ? csvData[i][0].toString().trim() : "";
@@ -89,16 +95,32 @@ function processAllFolders() {
               disbursementId = csvData[i][1] ? csvData[i][1].toString().trim() : "";
             }
           }
+
+          // FAST PATH: Check if this Disbursement ID has already been imported
+          if (disbursementId && existingDisbursementIds.has(disbursementId)) {
+            let msg = `[DUPLICATE] Skipping file (Disbursement ID '${disbursementId}' already processed): ${file.getName()}`;
+            finalLogs.push(msg);
+            file.moveTo(archiveFolder);
+            continue;
+          }
           
           // Format periodEnding date to DD-MM-YYYY
           const formattedPeriodEnding = formatBenevityDate(periodEnding);
           
-          // Parse data rows starting from row 13 (index 12)
-          if (csvData.length <= 12) {
-            throw new Error("No data rows found below headers (starting at row 13)");
+          // Dynamically find the header row by searching for "Company" in the first column
+          let headerIndex = -1;
+          for (let i = 0; i < csvData.length; i++) {
+            if (csvData[i][0] && csvData[i][0].toString().trim() === "Company") {
+              headerIndex = i;
+              break;
+            }
           }
           
-          for (let i = 12; i < csvData.length; i++) {
+          if (headerIndex === -1) {
+            throw new Error("Could not find the header row (starting with 'Company')");
+          }
+          
+          for (let i = headerIndex + 1; i < csvData.length; i++) {
             const row = csvData[i];
             if (!row || row.length === 0) continue;
             
@@ -140,8 +162,6 @@ function processAllFolders() {
             throw new Error("No valid donation rows processed");
           }
           
-          firstRowId = rowsToImport[0][idIndex].toString();
-          
         } else {
           // For other platforms, standard data extraction starting from index 1 (second row)
           rowsToImport = csvData.slice(1);
@@ -150,18 +170,19 @@ function processAllFolders() {
           } else {
             throw new Error("No data rows found");
           }
-        }
 
-        // FAST LOOKUP: .has() on a Set is near-instant
-        if (firstRowId && existingIds.has(firstRowId)) {
-          let msg = `[DUPLICATE] Skipping file: ${file.getName()}`;
-          finalLogs.push(msg);
-          file.moveTo(archiveFolder);
-          continue;
+          // FAST LOOKUP: Check Transaction ID duplicate for non-Benevity platforms
+          if (firstRowId && existingIds.has(firstRowId)) {
+            let msg = `[DUPLICATE] Skipping file: ${file.getName()}`;
+            finalLogs.push(msg);
+            file.moveTo(archiveFolder);
+            continue;
+          }
         }
 
         // Process data if not a duplicate
-        const importStats = smartAppend(targetSheet, rowsToImport, idIndex, existingIds);
+        const appendIdsSet = folderName === "Benevity" ? new Set() : existingIds;
+        const importStats = smartAppend(targetSheet, rowsToImport, idIndex, appendIdsSet);
         
         // Log success to Sheet and Console
         logSheet.appendRow([new Date(), folderName, fileName, file.getId(), importStats.added]);
@@ -172,12 +193,18 @@ function processAllFolders() {
         folderResults.rowsAdded += importStats.added;
         folderResults.duplicatesSkipped += importStats.skipped;
 
-        // Update the Set so the NEXT file in this loop knows about these new IDs
-        rowsToImport.forEach(row => {
-          if (row[idIndex]) {
-            existingIds.add(row[idIndex].toString());
+        // Update the Sets so the NEXT file in this loop knows about these new IDs
+        if (folderName === "Benevity") {
+          if (disbursementId) {
+            existingDisbursementIds.add(disbursementId);
           }
-        });
+        } else {
+          rowsToImport.forEach(row => {
+            if (row[idIndex]) {
+              existingIds.add(row[idIndex].toString());
+            }
+          });
+        }
 
       } catch (e) {
         let msg = `Error in ${fileName}: ${e.message}`;
