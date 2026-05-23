@@ -9,18 +9,40 @@ const CONFIG = {
   "ArchiveFolderName": "Archives"
 };
 
+/**
+ * Master Sheet column mapping per platform.
+ * Each key maps to the 0-based column index in the platform's sheet row (after processing).
+ * null = empty string in Master sheet.
+ * Master columns: Disbursement ID | Company Name | Project | Activity | Currency | Total Amount | Disbursed Date | Source
+ */
 const MASTER_MAPPING = {
-  "Benevity": { DisbursementID: 25, CompanyName: 0, Project: 1, Activity: 10, Currency: 14,
-   amount:(row) => {
-    const donationAmount = parseFloat(row[18]) || 0; // Total Donation to be Acknowledged
-    const matchAmount = parseFloat(row[19]) || 0; // Match Amount
-    const fee = parseFloat(row[21]) || 0; // Merchant Fee
-    const causeSupportFee = parseFloat(row[20]) || 0; // Cause Support Fee
-    return donationAmount + matchAmount - fee - causeSupportFee;
-   }
-   },
-  "CyberGrants": { DisbursementID: 2, CompanyName: 0, Project: 3, Activity: 6, Currency: 9 },
-  "GoodStack": { DisbursementID: 0, CompanyName: 4, Project: null, Activity: null, Currency: 9 }
+  "Benevity": {
+    DisbursementID: 25,   // Disbursement ID (appended column Z)
+    CompanyName: 0,       // Company
+    Project: 1,           // Project
+    Activity: 10,         // Activity
+    Currency: 14,         // Currency
+    TotalAmount: 23,      // Total Donation Received (calculated column X)
+    DisbursedDate: 24     // Period Ending (appended column Y)
+  },
+  "CyberGrants": {
+    DisbursementID: null,
+    CompanyName: 0,       // Company Name
+    Project: 3,           // Program Name
+    Activity: 6,          // Donation Designation
+    Currency: 20,         // Payment Net Amount (Currency Code)
+    TotalAmount: 19,      // Payment Net Amount
+    DisbursedDate: 22     // Payment Date
+  },
+  "GoodStack": {
+    DisbursementID: null,
+    CompanyName: 4,       // partner
+    Project: null,
+    Activity: null,
+    Currency: 2,          // currency code
+    TotalAmount: 12,      // Total Donation Received (calculated, appended as column 13 / index 12)
+    DisbursedDate: 10     // created at (UTC)
+  }
 };
 
 /**
@@ -32,6 +54,10 @@ function processAllFolders() {
   const platformsFolder = sheetParent.getFoldersByName("GrantManagementPlatforms").next();
   const archiveFolder = platformsFolder.getFoldersByName(CONFIG.ArchiveFolderName).next();
   const logSheet = ss.getSheetByName("Processing_Logs") || ss.insertSheet("Processing_Logs");
+  const masterSheet = ss.getSheetByName("Master") || ss.insertSheet("Master");
+  
+  // Ensure Master sheet has headers
+  ensureMasterHeaders(masterSheet);
   
   let reportSummary = [];
   let finalLogs = [];
@@ -44,9 +70,11 @@ function processAllFolders() {
     const targetSheet = ss.getSheetByName(CONFIG[folderName].sheetName);
     const idIndex = CONFIG[folderName].idIndex;
     
-    // Ensure sheet headers for Benevity
+    // Ensure sheet headers
     if (folderName === "Benevity") {
       ensureBenevityHeaders(targetSheet);
+    } else if (folderName === "GoodStack") {
+      ensureGoodStackHeaders(targetSheet);
     }
 
     // PERFORMANCE OPTIMIZATION: 
@@ -135,25 +163,17 @@ function processAllFolders() {
               cleanRow.push("");
             }
             
-            // Calculate Total Donation Received = Total Donation to be Acknowledged (18) + Match Amount (19) - Cause Support Fee (20) - Merchant Fee (21)
-            const parseAmount = (val) => {
-              if (!val) return 0;
-              const cleanVal = val.toString().replace(/[$,]/g, '').trim();
-              const parsed = parseFloat(cleanVal);
-              return isNaN(parsed) ? 0 : parsed;
-            };
-            
+            // Calculate Total Donation Received
             const ack = parseAmount(cleanRow[18]);
             const match = parseAmount(cleanRow[19]);
             const causeSupportFee = parseAmount(cleanRow[20]);
             const merchantFee = parseAmount(cleanRow[21]);
-            
             const totalDonationReceived = Number((ack + match - causeSupportFee - merchantFee).toFixed(2));
             
-            // Append the 3 new columns
-            cleanRow.push(totalDonationReceived);
-            cleanRow.push(formattedPeriodEnding);
-            cleanRow.push(disbursementId);
+            // Append the 3 new columns: Total Donation Received, Period Ending, Disbursement ID
+            cleanRow.push(totalDonationReceived);   // index 23
+            cleanRow.push(formattedPeriodEnding);    // index 24
+            cleanRow.push(disbursementId);           // index 25
             
             rowsToImport.push(cleanRow);
           }
@@ -161,9 +181,37 @@ function processAllFolders() {
           if (rowsToImport.length === 0) {
             throw new Error("No valid donation rows processed");
           }
-          
+
+        } else if (folderName === "GoodStack") {
+          // GoodStack: standard CSV with header in row 1
+          rowsToImport = csvData.slice(1);
+          if (rowsToImport.length === 0) throw new Error("No data rows found");
+
+          firstRowId = rowsToImport[0][idIndex] ? rowsToImport[0][idIndex].toString() : "";
+
+          // FAST LOOKUP: Check Transaction ID duplicate
+          if (firstRowId && existingIds.has(firstRowId)) {
+            let msg = `[DUPLICATE] Skipping file: ${file.getName()}`;
+            finalLogs.push(msg);
+            file.moveTo(archiveFolder);
+            continue;
+          }
+
+          // Calculate and append Total Donation Received = gross donation (1) - fees (8)
+          rowsToImport = rowsToImport.map(row => {
+            let cleanRow = row.slice(0, 12);
+            while (cleanRow.length < 12) {
+              cleanRow.push("");
+            }
+            const grossDonation = parseAmount(cleanRow[1]);
+            const fees = parseAmount(cleanRow[8]);
+            const totalDonationReceived = Number((grossDonation - fees).toFixed(2));
+            cleanRow.push(totalDonationReceived); // index 12
+            return cleanRow;
+          });
+
         } else {
-          // For other platforms, standard data extraction starting from index 1 (second row)
+          // CyberGrants: standard CSV with header in row 1
           rowsToImport = csvData.slice(1);
           if (rowsToImport.length > 0) {
             firstRowId = rowsToImport[0][idIndex].toString();
@@ -171,7 +219,7 @@ function processAllFolders() {
             throw new Error("No data rows found");
           }
 
-          // FAST LOOKUP: Check Transaction ID duplicate for non-Benevity platforms
+          // FAST LOOKUP: Check Transaction ID duplicate for CyberGrants
           if (firstRowId && existingIds.has(firstRowId)) {
             let msg = `[DUPLICATE] Skipping file: ${file.getName()}`;
             finalLogs.push(msg);
@@ -180,10 +228,16 @@ function processAllFolders() {
           }
         }
 
-        // Process data if not a duplicate
+        // Write to the individual platform sheet
         const appendIdsSet = folderName === "Benevity" ? new Set() : existingIds;
         const importStats = smartAppend(targetSheet, rowsToImport, idIndex, appendIdsSet);
         
+        // Build and write Master sheet rows from successfully imported data
+        if (importStats.appendedRows.length > 0) {
+          const masterRows = importStats.appendedRows.map(row => mapToMasterRow(row, folderName));
+          appendToMaster(masterSheet, masterRows);
+        }
+
         // Log success to Sheet and Console
         logSheet.appendRow([new Date(), folderName, fileName, file.getId(), importStats.added]);
         let msg = `[SUCCESS] Processed '${fileName}' from folder '${folderName}'. Rows added: ${importStats.added}, Skipped: ${importStats.skipped}.`;
@@ -212,7 +266,7 @@ function processAllFolders() {
         folderResults.errors.push(`Error in ${fileName}: ${e.message}`);
       }
 
-      // 2. MOVE TO ARCHIVE ALWAYS (at the end of the loop, successful or not)
+      // MOVE TO ARCHIVE ALWAYS (at the end of the loop, successful or not)
       file.moveTo(archiveFolder);
       let msg = `[ARCHIVED] Moved '${fileName}' to '${CONFIG.ArchiveFolderName}'.`;
       finalLogs.push(msg);
@@ -224,15 +278,63 @@ function processAllFolders() {
   return finalLogs;
 }
 
+// ============================================================
+// HELPER: Parse currency/amount strings to float
+// ============================================================
+function parseAmount(val) {
+  if (!val) return 0;
+  const cleanVal = val.toString().replace(/[$,]/g, '').trim();
+  const parsed = parseFloat(cleanVal);
+  return isNaN(parsed) ? 0 : parsed;
+}
+
+// ============================================================
+// MASTER SHEET: Map a platform row to the Master sheet format
+// ============================================================
 /**
- * IMPROVED: Smart Append with protection against uneven column lengths and caching of existing IDs
+ * Transforms a single platform row into a Master sheet row using MASTER_MAPPING.
+ * Master columns: Disbursement ID | Company Name | Project | Activity | Currency | Total Amount | Disbursed Date | Source
  */
+function mapToMasterRow(row, folderName) {
+  const mapping = MASTER_MAPPING[folderName];
+  if (!mapping) return [];
+
+  const getVal = (index) => {
+    if (index === null || index === undefined) return "";
+    return (row[index] !== undefined && row[index] !== null) ? row[index] : "";
+  };
+
+  return [
+    getVal(mapping.DisbursementID),
+    getVal(mapping.CompanyName),
+    getVal(mapping.Project),
+    getVal(mapping.Activity),
+    getVal(mapping.Currency),
+    getVal(mapping.TotalAmount),
+    getVal(mapping.DisbursedDate),
+    folderName  // Source
+  ];
+}
+
+// ============================================================
+// MASTER SHEET: Batch append rows (no dedup needed, already filtered)
+// ============================================================
+function appendToMaster(masterSheet, rows) {
+  if (!rows || rows.length === 0) return;
+  const colCount = 8; // Master sheet always has exactly 8 columns
+  masterSheet.getRange(masterSheet.getLastRow() + 1, 1, rows.length, colCount)
+             .setValues(rows);
+}
+
+// ============================================================
+// SMART APPEND: Now returns appendedRows for Master sheet population
+// ============================================================
 function smartAppend(sheet, rows, idIndex, existingIdsSet) {
   if (!rows || rows.length === 0) {
-    return { added: 0, skipped: 0 };
+    return { added: 0, skipped: 0, appendedRows: [] };
   }
   
-  const TARGET_COL_COUNT = sheet.getLastColumn() || rows[0].length; // Fallback if getLastColumn is 0
+  const TARGET_COL_COUNT = sheet.getLastColumn() || rows[0].length;
   const lastRow = sheet.getLastRow();
   
   // Get existing IDs from Column (idIndex + 1)
@@ -246,10 +348,11 @@ function smartAppend(sheet, rows, idIndex, existingIdsSet) {
   }
 
   const rowsToAppend = [];
+  const originalRows = []; // Track original rows before padding/trimming for Master mapping
   rows.forEach(row => {
     // 1. Ensure ID exists
     const id = row[idIndex] ? row[idIndex].toString() : null;
-    if (!id || id === "") return; // Skip empty rows
+    if (!id || id === "") return;
 
     // 2. Prevent Duplicates
     if (existingIds.has(id)) return;
@@ -264,16 +367,17 @@ function smartAppend(sheet, rows, idIndex, existingIdsSet) {
     }
     
     rowsToAppend.push(cleanRow);
+    originalRows.push([...row]); // Keep the full original row for Master mapping
     existingIds.add(id);
   });
 
-  // 4. Batch Write
+  // Batch Write
   if (rowsToAppend.length > 0) {
     sheet.getRange(sheet.getLastRow() + 1, 1, rowsToAppend.length, TARGET_COL_COUNT)
          .setValues(rowsToAppend);
   }
 
-  return { added: rowsToAppend.length, skipped: (rows.length - rowsToAppend.length) };
+  return { added: rowsToAppend.length, skipped: (rows.length - rowsToAppend.length), appendedRows: originalRows };
 }
 
 /**
@@ -283,7 +387,6 @@ function isIdAlreadyInSheet(sheet, idIndex, id) {
   const lastRow = sheet.getLastRow();
   if (lastRow <= 1) return false;
   
-  // Get all IDs in the column
   const existingIds = sheet.getRange(2, idIndex + 1, lastRow - 1, 1).getValues().flat();
   return existingIds.includes(id.toString());
 }
@@ -306,7 +409,6 @@ function parseMessyCsv(content) {
   let field = "";
   let inQuotes = false;
 
-  // Add a newline to the end of content to ensure the loop processes the final row
   const data = content.trim() + "\n";
 
   for (let i = 0; i < data.length; i++) {
@@ -319,7 +421,6 @@ function parseMessyCsv(content) {
       field = "";
     } else if (char === '\n' && !inQuotes) {
       row.push(field.trim());
-      // Only push if the row isn't just empty (handles trailing newlines)
       if (row.length > 1 || (row.length === 1 && row[0] !== "")) {
         result.push(row);
       }
@@ -332,8 +433,12 @@ function parseMessyCsv(content) {
   return result;
 }
 
+// ============================================================
+// HEADER SETUP FUNCTIONS
+// ============================================================
+
 /**
- * Automatically ensures the target sheet has the proper columns for Benevity.
+ * Ensures the Benevity sheet has the proper 26-column headers.
  */
 function ensureBenevityHeaders(sheet) {
   const lastCol = sheet.getLastColumn();
@@ -353,6 +458,37 @@ function ensureBenevityHeaders(sheet) {
 }
 
 /**
+ * Ensures the GoodStack sheet has the "Total Donation Received" column appended.
+ */
+function ensureGoodStackHeaders(sheet) {
+  const lastCol = sheet.getLastColumn();
+  if (lastCol === 0) {
+    const headers = [
+      "donation id", "gross donation", "currency code", "marketing consent", "partner",
+      "donor first name", "donor last name", "donor email", "fees", "fees currency",
+      "created at (UTC)", "gift note", "Total Donation Received"
+    ];
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  } else if (lastCol < 13) {
+    sheet.getRange(1, lastCol + 1, 1, 1).setValues([["Total Donation Received"]]);
+  }
+}
+
+/**
+ * Ensures the Master sheet has the correct 8-column headers.
+ */
+function ensureMasterHeaders(sheet) {
+  const lastCol = sheet.getLastColumn();
+  if (lastCol === 0) {
+    const headers = [
+      "Disbursement ID", "Company Name", "Project", "Activity",
+      "Currency", "Total Amount", "Disbursed Date", "Source"
+    ];
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  }
+}
+
+/**
  * Formats a Date string from the report metadata (e.g. "Mon 4 May 2026 0:00:00") to "DD-MM-YYYY".
  */
 function formatBenevityDate(dateStr) {
@@ -360,7 +496,6 @@ function formatBenevityDate(dateStr) {
   const d = new Date(dateStr);
   if (isNaN(d.getTime())) {
     // Fallback: parse using Regex if Date constructor fails
-    // e.g. Mon 4 May 2026 0:00:00
     const match = dateStr.match(/(\d+)\s+([A-Za-z]+)\s+(\d{4})/);
     if (match) {
       const day = parseInt(match[1], 10);
@@ -374,7 +509,7 @@ function formatBenevityDate(dateStr) {
         return `${dd}-${mm}-${year}`;
       }
     }
-    return dateStr; // fallback to original if parsing completely fails
+    return dateStr;
   }
   const day = d.getDate();
   const month = d.getMonth() + 1;
