@@ -245,6 +245,7 @@ function processAllFolders() {
         if (importStats.appendedRows.length > 0) {
           const masterRows = importStats.appendedRows.map(row => mapToMasterRow(row, folderName));
           appendToMaster(masterSheet, masterRows);
+          finalLogs.push(`[SUCCESS] Master sheet updated for '${fileName}'. Rows added: ${masterRows.length}.`);
         }
 
         // Log success to Sheet and Console
@@ -451,7 +452,12 @@ function validateHeaderCount(folderName, headerRow) {
   const expectedCount = EXPECTED_HEADER_COUNTS[folderName];
   if (!expectedCount) return;
 
-  const actualCount = headerRow ? headerRow.length : 0;
+  const headers = headerRow ? headerRow.slice() : [];
+  while (headers.length > 0 && headers[headers.length - 1].toString().trim() === "") {
+    headers.pop();
+  }
+
+  const actualCount = headers.length;
   if (actualCount !== expectedCount) {
     throw new Error(`Please upload the correct report. ${folderName} CSV should have ${expectedCount} headers, but found ${actualCount}.`);
   }
