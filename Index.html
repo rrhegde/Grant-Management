@@ -34,10 +34,11 @@
       function log(msg) {
         const container = document.getElementById('log-container');
         const div = document.createElement('div');
+        const normalizedMsg = msg.toLowerCase();
         
         // Color coding based on log content
         if(msg.includes('SUCCESS')) div.style.color = '#00ff00';
-        if(msg.includes('ERROR') || msg.includes('Warning')) div.style.color = '#ff4d4d';
+        if(normalizedMsg.includes('error') || normalizedMsg.includes('warning') || normalizedMsg.includes('please upload the correct report')) div.style.color = '#ff4d4d';
         if(msg.includes('DUPLICATE')) div.style.color = '#ffcc00';
         
         div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;

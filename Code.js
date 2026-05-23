@@ -9,6 +9,12 @@ const CONFIG = {
   "ArchiveFolderName": "Archives"
 };
 
+const EXPECTED_HEADER_COUNTS = {
+  "GoodStack": 12,
+  "Benevity": 23,
+  "CyberGrants": 34
+};
+
 /**
  * Master Sheet column mapping per platform.
  * Each key maps to the 0-based column index in the platform's sheet row (after processing).
@@ -147,6 +153,7 @@ function processAllFolders() {
           if (headerIndex === -1) {
             throw new Error("Could not find the header row (starting with 'Company')");
           }
+          validateHeaderCount(folderName, csvData[headerIndex]);
           
           for (let i = headerIndex + 1; i < csvData.length; i++) {
             const row = csvData[i];
@@ -184,6 +191,7 @@ function processAllFolders() {
 
         } else if (folderName === "GoodStack") {
           // GoodStack: standard CSV with header in row 1
+          validateHeaderCount(folderName, csvData[0]);
           rowsToImport = csvData.slice(1);
           if (rowsToImport.length === 0) throw new Error("No data rows found");
 
@@ -212,6 +220,7 @@ function processAllFolders() {
 
         } else {
           // CyberGrants: standard CSV with header in row 1
+          validateHeaderCount(folderName, csvData[0]);
           rowsToImport = csvData.slice(1);
           if (rowsToImport.length > 0) {
             firstRowId = rowsToImport[0][idIndex].toString();
@@ -304,6 +313,8 @@ function mapToMasterRow(row, folderName) {
     return (row[index] !== undefined && row[index] !== null) ? row[index] : "";
   };
 
+  const disbursedDate = getVal(mapping.DisbursedDate);
+
   return [
     getVal(mapping.DisbursementID),
     getVal(mapping.CompanyName),
@@ -311,7 +322,7 @@ function mapToMasterRow(row, folderName) {
     getVal(mapping.Activity),
     getVal(mapping.Currency),
     getVal(mapping.TotalAmount),
-    getVal(mapping.DisbursedDate),
+    folderName === "GoodStack" ? formatDateToDDMMYYYY(disbursedDate) : disbursedDate,
     folderName  // Source
   ];
 }
@@ -434,6 +445,19 @@ function parseMessyCsv(content) {
 }
 
 // ============================================================
+// HEADER VALIDATION
+// ============================================================
+function validateHeaderCount(folderName, headerRow) {
+  const expectedCount = EXPECTED_HEADER_COUNTS[folderName];
+  if (!expectedCount) return;
+
+  const actualCount = headerRow ? headerRow.length : 0;
+  if (actualCount !== expectedCount) {
+    throw new Error(`Please upload the correct report. ${folderName} CSV should have ${expectedCount} headers, but found ${actualCount}.`);
+  }
+}
+
+// ============================================================
 // HEADER SETUP FUNCTIONS
 // ============================================================
 
@@ -492,11 +516,28 @@ function ensureMasterHeaders(sheet) {
  * Formats a Date string from the report metadata (e.g. "Mon 4 May 2026 0:00:00") to "DD-MM-YYYY".
  */
 function formatBenevityDate(dateStr) {
+  return formatDateToDDMMYYYY(dateStr);
+}
+
+function formatDateToDDMMYYYY(dateStr) {
   if (!dateStr) return "";
+
+  const value = dateStr.toString().trim();
+
+  const alreadyFormatted = value.match(/^(\d{2})-(\d{2})-(\d{4})$/);
+  if (alreadyFormatted) return value;
+
+  const isoLike = value.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (isoLike) {
+    const dd = isoLike[3].padStart(2, "0");
+    const mm = isoLike[2].padStart(2, "0");
+    return `${dd}-${mm}-${isoLike[1]}`;
+  }
+
   const d = new Date(dateStr);
   if (isNaN(d.getTime())) {
     // Fallback: parse using Regex if Date constructor fails
-    const match = dateStr.match(/(\d+)\s+([A-Za-z]+)\s+(\d{4})/);
+    const match = value.match(/(\d+)\s+([A-Za-z]+)\s+(\d{4})/);
     if (match) {
       const day = parseInt(match[1], 10);
       const monthStr = match[2].toLowerCase();
@@ -509,7 +550,7 @@ function formatBenevityDate(dateStr) {
         return `${dd}-${mm}-${year}`;
       }
     }
-    return dateStr;
+    return value;
   }
   const day = d.getDate();
   const month = d.getMonth() + 1;
