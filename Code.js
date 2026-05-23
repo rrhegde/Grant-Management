@@ -10,22 +10,6 @@ const CONFIG = {
 };
 
 /**
-
-**/
-const MASTER_MAPPING = {
-  "Benevity": { DisbursementID: 2, CompanyName: 8, Project: 10, Activity: 9, Currency: 8,
-   amount:(row) => {
-    const donationAmount = parseFloat(row[16]) || 0;
-    const matchAmount = parseFloat(row[17]) || 0;
-    const fee = parseFloat(row[21]) || 0; // Assuming index 21 is Merchant Fee
-    return donation + match - fee;
-   }
-   },
-  "CyberGrants": { DisbursementID: 2, CompanyName: 0, Project: 3, Activity: 6, Currency: 9 },
-  "GoodStack": { DisbursementID: 0, CompanyName: 4, Project: null, Activity: null, Currency: 9 }
-};
-
-/**
  * Main function to be triggered by your Web App button.
  */
 function processAllFolders() {
@@ -131,8 +115,6 @@ function processAllFolders() {
     reportSummary.push(folderResults);
   }
 
-  updateMasterSheet();
-  
   finalLogs.push("Process Finished Successfully.");
   return finalLogs;
 }
